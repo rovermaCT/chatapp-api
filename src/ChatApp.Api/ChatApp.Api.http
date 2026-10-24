@@ -1,0 +1,78 @@
+@host = https://localhost:7129
+# Paste an access_token from register/login here.
+@token = <access_token>
+@refreshToken = <refresh_token>
+@requestId = <friend_request_id>
+
+### Register
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "userName": "alice",
+  "password": "Passw0rd!",
+  "displayName": "Alice"
+}
+
+### Login (JSON)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "userNameOrEmail": "alice",
+  "password": "Passw0rd!"
+}
+
+### OAuth 2.0 token endpoint - password grant
+POST {{host}}/connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&username=alice&password=Passw0rd!
+
+### OAuth 2.0 token endpoint - refresh token grant
+POST {{host}}/connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&refresh_token={{refreshToken}}
+
+### Current user
+GET {{host}}/api/auth/me
+Authorization: Bearer {{token}}
+
+### Configured OIDC providers
+GET {{host}}/api/auth/providers
+
+### Logout (revoke one refresh token; send {} to revoke all)
+POST {{host}}/api/auth/logout
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+### Send friend request
+POST {{host}}/api/friends/requests
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "userName": "bob" }
+
+### Incoming pending requests (use direction=outgoing for sent ones)
+GET {{host}}/api/friends/requests?direction=incoming
+Authorization: Bearer {{token}}
+
+### Accept
+POST {{host}}/api/friends/requests/{{requestId}}/accept
+Authorization: Bearer {{token}}
+
+### Decline
+POST {{host}}/api/friends/requests/{{requestId}}/decline
+Authorization: Bearer {{token}}
+
+### Cancel (sender)
+POST {{host}}/api/friends/requests/{{requestId}}/cancel
+Authorization: Bearer {{token}}
+
+### Friends
+GET {{host}}/api/friends
+Authorization: Bearer {{token}}
