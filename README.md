@@ -3,7 +3,7 @@
 ASP.NET Core (.NET 10) Web API for a chat application: local registration/login, OpenID Connect login
 with external providers, OAuth 2.0 token endpoint issuing JWTs, and friend requests.
 
-Stack: ASP.NET Core Identity, EF Core (SQLite), JWT bearer auth, OpenID Connect handler.
+Stack: ASP.NET Core Identity, EF Core (SQL Server), JWT bearer auth, OpenID Connect handler.
 
 ## Run
 
@@ -12,7 +12,12 @@ dotnet tool restore
 dotnet run --project src/ChatApp.Api --launch-profile https
 ```
 
-In Development the database (`chatapp.db`) is migrated on startup and the OpenAPI document is at
+Requires SQL Server. The default connection string (`ConnectionStrings:Default`) points at the local default
+instance with Windows authentication and database `ChatApp`; override it with user-secrets or the
+`ConnectionStrings__Default` environment variable for other servers (e.g. LocalDB:
+`Server=(localdb)\\MSSQLLocalDB;Database=ChatApp;Trusted_Connection=True`).
+
+In Development the database is created/migrated on startup and the OpenAPI document is at
 `/openapi/v1.json`. Sample requests are in [ChatApp.Api.http](src/ChatApp.Api/ChatApp.Api.http).
 
 Swagger UI is at `https://localhost:7129/swagger`. To call the protected endpoints, click **Authorize** and either
@@ -84,5 +89,4 @@ in a browser.
 ## Production notes
 
 - Authorization codes are kept in `IMemoryCache`; use a distributed cache when running more than one instance.
-- Swap SQLite for SQL Server/PostgreSQL by changing the EF provider and regenerating migrations.
 - Apply migrations as a deployment step (`dotnet ef database update`) instead of on startup.

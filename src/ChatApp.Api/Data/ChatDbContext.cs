@@ -16,7 +16,7 @@ public class ChatDbContext(DbContextOptions<ChatDbContext> options)
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
-        // SQLite stores DateTime as text and drops DateTimeKind; every timestamp here is UTC, so restore that on read.
+        // datetime2 doesn't store DateTimeKind; every timestamp here is UTC, so restore that on read.
         configurationBuilder.Properties<DateTime>().HaveConversion<UtcDateTimeConverter>();
         configurationBuilder.Properties<DateTime?>().HaveConversion<UtcDateTimeConverter>();
     }
@@ -55,7 +55,7 @@ public class ChatDbContext(DbContextOptions<ChatDbContext> options)
             // At most one pending request per sender/receiver pair; history rows are kept.
             request.HasIndex(r => new { r.SenderId, r.ReceiverId })
                 .IsUnique()
-                .HasFilter($"\"{nameof(FriendRequest.Status)}\" = {(int)FriendRequestStatus.Pending}");
+                .HasFilter($"[{nameof(FriendRequest.Status)}] = {(int)FriendRequestStatus.Pending}");
             request.HasIndex(r => new { r.ReceiverId, r.Status });
         });
 

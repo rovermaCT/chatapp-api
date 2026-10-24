@@ -16,7 +16,9 @@ builder.Services.AddMemoryCache();
 builder.Services.AddSingleton(TimeProvider.System);
 
 builder.Services.AddDbContext<ChatDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("Default")));
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("Default"),
+        sqlServer => sqlServer.EnableRetryOnFailure()));
 
 builder.Services.AddChatIdentity();
 builder.Services.AddChatAuthentication(builder.Configuration);
