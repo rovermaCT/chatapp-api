@@ -51,6 +51,8 @@ public sealed partial class AuthService(
         });
         await db.SaveChangesAsync(ct);
 
+        logger.LogInformation("Issued tokens for user {UserId}; access token expires at {AccessTokenExpiresAt}",
+            user.Id, accessTokenExpiresAt);
         return new TokenResponse(
             accessToken,
             "Bearer",
@@ -66,15 +68,24 @@ public sealed partial class AuthService(
             : await userManager.FindByNameAsync(userNameOrEmail);
         if (user is null)
         {
+            logger.LogInformation("Sign-in failed: no user matches {LoginName}", userNameOrEmail);
             return (CredentialCheck.Invalid, null);
         }
 
         var result = await signInManager.CheckPasswordSignInAsync(user, password, lockoutOnFailure: true);
         if (result.IsLockedOut)
         {
+            logger.LogWarning("Sign-in rejected: user {UserId} is locked out", user.Id);
             return (CredentialCheck.LockedOut, null);
         }
-        return result.Succeeded ? (CredentialCheck.Succeeded, user) : (CredentialCheck.Invalid, null);
+        if (!result.Succeeded)
+        {
+            logger.LogWarning("Sign-in failed: invalid password for user {UserId}", user.Id);
+            return (CredentialCheck.Invalid, null);
+        }
+
+        logger.LogInformation("User {UserId} signed in with password", user.Id);
+        return (CredentialCheck.Succeeded, user);
     }
 
     /// <summary>Rotates a refresh token: the presented token is revoked and a new pair is issued.</summary>
@@ -87,6 +98,7 @@ public sealed partial class AuthService(
             .SingleOrDefaultAsync(t => t.TokenHash == hash, ct);
         if (stored is null)
         {
+            logger.LogInformation("Refresh rejected: unknown refresh token");
             return null;
         }
 
@@ -99,8 +111,15 @@ public sealed partial class AuthService(
         }
 
         var now = UtcNow;
-        if (stored.ExpiresAt <= now || await userManager.IsLockedOutAsync(stored.User))
+        if (stored.ExpiresAt <= now)
         {
+            logger.LogInformation("Refresh rejected: token {TokenId} for user {UserId} expired at {ExpiresAt}",
+                stored.Id, stored.UserId, stored.ExpiresAt);
+            return null;
+        }
+        if (await userManager.IsLockedOutAsync(stored.User))
+        {
+            logger.LogWarning("Refresh rejected: user {UserId} is locked out", stored.UserId);
             return null;
         }
 
@@ -110,24 +129,33 @@ public sealed partial class AuthService(
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAt, now), ct);
         if (revoked == 0)
         {
+            logger.LogWarning("Refresh rejected: token {TokenId} for user {UserId} was rotated concurrently",
+                stored.Id, stored.UserId);
             return null;
         }
 
+        logger.LogInformation("Rotated refresh token {TokenId} for user {UserId}", stored.Id, stored.UserId);
         return await IssueTokensAsync(stored.User, ct);
     }
 
-    public Task<int> RevokeAsync(Guid userId, string refreshToken, CancellationToken ct = default)
+    public async Task<int> RevokeAsync(Guid userId, string refreshToken, CancellationToken ct = default)
     {
         var hash = TokenService.Hash(refreshToken);
-        return db.RefreshTokens
+        var count = await db.RefreshTokens
             .Where(t => t.UserId == userId && t.TokenHash == hash && t.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAt, UtcNow), ct);
+        logger.LogInformation("Revoked {Count} refresh token(s) for user {UserId}", count, userId);
+        return count;
     }
 
-    public Task<int> RevokeAllAsync(Guid userId, CancellationToken ct = default) =>
-        db.RefreshTokens
+    public async Task<int> RevokeAllAsync(Guid userId, CancellationToken ct = default)
+    {
+        var count = await db.RefreshTokens
             .Where(t => t.UserId == userId && t.RevokedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAt, UtcNow), ct);
+        logger.LogInformation("Revoked all {Count} active refresh token(s) for user {UserId}", count, userId);
+        return count;
+    }
 
     /// <summary>
     /// Maps an authenticated OIDC principal to a local user, creating or linking the account on first login.
@@ -137,12 +165,14 @@ public sealed partial class AuthService(
         var subject = principal.FindFirstValue(JwtRegisteredClaimNames.Sub);
         if (string.IsNullOrEmpty(subject))
         {
+            logger.LogWarning("External login from {Provider} rejected: no subject identifier", provider);
             return (null, "The identity provider did not return a subject identifier.");
         }
 
         var user = await userManager.FindByLoginAsync(provider, subject);
         if (user is not null)
         {
+            logger.LogInformation("External login from {Provider} matched existing user {UserId}", provider, user.Id);
             return (user, null);
         }
 
@@ -159,6 +189,9 @@ public sealed partial class AuthService(
                 // "victim@example.com" at a provider (or locally, before the victim) and hijack the account.
                 if (!emailVerified || !existing.EmailConfirmed)
                 {
+                    logger.LogWarning(
+                        "External login from {Provider} not linked to user {UserId}: email not verified (provider {ProviderEmailVerified}, local {LocalEmailConfirmed})",
+                        provider, existing.Id, emailVerified, existing.EmailConfirmed);
                     return (null, "An account with this email already exists. Sign in with your password to continue.");
                 }
                 user = existing;
@@ -179,13 +212,18 @@ public sealed partial class AuthService(
             var created = await userManager.CreateAsync(user);
             if (!created.Succeeded)
             {
+                logger.LogWarning("Could not create user for {Provider} login: {@Errors}",
+                    provider, created.Errors.Select(e => e.Code));
                 return (null, string.Join(" ", created.Errors.Select(e => e.Description)));
             }
+            logger.LogInformation("Created user {UserId} ({UserName}) from {Provider} login", user.Id, userName, provider);
         }
 
         var linked = await userManager.AddLoginAsync(user, new UserLoginInfo(provider, subject, provider));
         if (!linked.Succeeded)
         {
+            logger.LogWarning("Could not link {Provider} login to user {UserId}: {@Errors}",
+                provider, user.Id, linked.Errors.Select(e => e.Code));
             return (null, string.Join(" ", linked.Errors.Select(e => e.Description)));
         }
 
@@ -201,6 +239,7 @@ public sealed partial class AuthService(
             AuthorizationCodeKey(code),
             new PendingAuthorization(userId, redirectUri, codeChallenge),
             TimeSpan.FromSeconds(externalOptions.Value.AuthorizationCodeLifetimeSeconds));
+        logger.LogDebug("Issued authorization code for user {UserId} (PKCE: {UsesPkce})", userId, codeChallenge is not null);
         return code;
     }
 
@@ -209,20 +248,28 @@ public sealed partial class AuthService(
         var key = AuthorizationCodeKey(code);
         if (!cache.TryGetValue(key, out PendingAuthorization? pending) || pending is null)
         {
+            logger.LogWarning("Authorization code rejected: {Reason}", "unknown, expired or already used");
             return null;
         }
         cache.Remove(key);
 
         if (!string.Equals(pending.RedirectUri, redirectUri, StringComparison.Ordinal))
         {
+            logger.LogWarning("Authorization code for user {UserId} rejected: {Reason}", pending.UserId, "redirect_uri mismatch");
             return null;
         }
         if (pending.CodeChallenge is not null && !VerifyPkce(pending.CodeChallenge, codeVerifier))
         {
+            logger.LogWarning("Authorization code for user {UserId} rejected: {Reason}", pending.UserId, "PKCE verification failed");
             return null;
         }
 
-        return await userManager.FindByIdAsync(pending.UserId.ToString());
+        var user = await userManager.FindByIdAsync(pending.UserId.ToString());
+        if (user is null)
+        {
+            logger.LogWarning("Authorization code rejected: user {UserId} no longer exists", pending.UserId);
+        }
+        return user;
     }
 
     private static bool VerifyPkce(string codeChallenge, string? codeVerifier)

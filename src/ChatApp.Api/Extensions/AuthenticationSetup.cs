@@ -78,6 +78,15 @@ public static class AuthenticationSetup
                     NameClaimType = JwtRegisteredClaimNames.UniqueName,
                     RoleClaimType = Services.AppClaimTypes.Role
                 };
+                options.Events = new JwtBearerEvents
+                {
+                    OnAuthenticationFailed = context =>
+                    {
+                        CreateLogger(context.HttpContext).LogDebug(context.Exception,
+                            "Bearer token rejected for {Path}", context.Request.Path);
+                        return Task.CompletedTask;
+                    }
+                };
             });
 
         var externalAuth = configuration.GetSection(ExternalAuthOptions.SectionName).Get<ExternalAuthOptions>() ?? new();
@@ -118,6 +127,14 @@ public static class AuthenticationSetup
             options.AddPolicy(RateLimitPolicies.Auth, context => RateLimitPartition.GetFixedWindowLimiter(
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1) }));
+            options.OnRejected = (context, _) =>
+            {
+                CreateLogger(context.HttpContext).LogWarning("Rate limit exceeded by {ClientIp} on {Method} {Path}",
+                    context.HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    context.HttpContext.Request.Method,
+                    context.HttpContext.Request.Path);
+                return ValueTask.CompletedTask;
+            };
         });
         return services;
     }
@@ -126,9 +143,7 @@ public static class AuthenticationSetup
     private static Task HandleRemoteFailure(RemoteFailureContext context)
     {
         context.HandleResponse();
-        context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
-            .CreateLogger(typeof(AuthenticationSetup))
-            .LogWarning(context.Failure, "External login with {Scheme} failed", context.Scheme.Name);
+        CreateLogger(context.HttpContext).LogWarning(context.Failure, "External login with {Scheme} failed", context.Scheme.Name);
 
         const string description = "External login was cancelled or failed.";
         var properties = context.Properties;
@@ -151,4 +166,7 @@ public static class AuthenticationSetup
             Detail = description
         });
     }
+
+    private static ILogger CreateLogger(HttpContext context) =>
+        context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(AuthenticationSetup));
 }

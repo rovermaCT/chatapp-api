@@ -7,7 +7,11 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ChatApp.Api.Services;
 
-public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser> userManager, TimeProvider time)
+public sealed class FriendService(
+    ChatDbContext db,
+    UserManager<ApplicationUser> userManager,
+    TimeProvider time,
+    ILogger<FriendService> logger)
 {
     private static readonly Expression<Func<FriendRequest, FriendRequestResponse>> ToResponse = r =>
         new FriendRequestResponse(
@@ -34,7 +38,14 @@ public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser>
         var removed = await db.Friendships
             .Where(f => (f.UserId == userId && f.FriendId == friendId) || (f.UserId == friendId && f.FriendId == userId))
             .ExecuteDeleteAsync(ct);
-        return removed == 0 ? ServiceError.NotFound("You are not friends with this user.") : true;
+        if (removed == 0)
+        {
+            logger.LogDebug("User {UserId} tried to remove {FriendId}, who is not a friend", userId, friendId);
+            return ServiceError.NotFound("You are not friends with this user.");
+        }
+
+        logger.LogInformation("User {UserId} removed friend {FriendId}", userId, friendId);
+        return true;
     }
 
     public Task<List<FriendRequestResponse>> GetPendingRequestsAsync(Guid userId, FriendRequestDirection direction, CancellationToken ct)
@@ -68,14 +79,17 @@ public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser>
             .SingleOrDefaultAsync(ct);
         if (receiverId is not { } targetId)
         {
+            logger.LogDebug("Friend request from {SenderId} rejected: user {ReceiverUserName} not found", senderId, receiverUserName);
             return ServiceError.NotFound($"User '{receiverUserName}' was not found.");
         }
         if (targetId == senderId)
         {
+            logger.LogDebug("Friend request from {SenderId} rejected: sent to self", senderId);
             return ServiceError.BadRequest("You cannot send a friend request to yourself.");
         }
         if (await db.Friendships.AnyAsync(f => f.UserId == senderId && f.FriendId == targetId, ct))
         {
+            logger.LogDebug("Friend request from {SenderId} to {ReceiverId} rejected: already friends", senderId, targetId);
             return ServiceError.Conflict("You are already friends with this user.");
         }
 
@@ -86,6 +100,8 @@ public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser>
             .FirstOrDefaultAsync(ct);
         if (existing is not null)
         {
+            logger.LogDebug("Friend request from {SenderId} to {ReceiverId} rejected: pending request {RequestId} exists",
+                senderId, targetId, existing.Id);
             return ServiceError.Conflict(existing.SenderId == senderId
                 ? "You already have a pending friend request to this user."
                 : $"This user has already sent you a friend request. Accept request {existing.Id} instead.");
@@ -104,12 +120,14 @@ public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser>
         {
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex)
         {
             // Lost a race with an identical request; the filtered unique index rejected the duplicate.
+            logger.LogWarning(ex, "Friend request from {SenderId} to {ReceiverId} lost a race with a duplicate", senderId, targetId);
             return ServiceError.Conflict("You already have a pending friend request to this user.");
         }
 
+        logger.LogInformation("Friend request {RequestId} sent from {SenderId} to {ReceiverId}", request.Id, senderId, targetId);
         return await db.FriendRequests.Where(r => r.Id == request.Id).Select(ToResponse).SingleAsync(ct);
     }
 
@@ -149,26 +167,31 @@ public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser>
         {
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex)
         {
+            logger.LogWarning(ex, "Accepting friend request {RequestId} by user {UserId} conflicted with a concurrent change",
+                requestId, userId);
             return ServiceError.Conflict("This friend request was already handled.");
         }
 
+        logger.LogInformation("Friend request {RequestId} accepted by user {UserId}; now friends with {FriendId}",
+            request.Id, userId, request.SenderId);
         return await LoadAsync(request.Id, ct);
     }
 
     public Task<ServiceResult<FriendRequestResponse>> DeclineAsync(Guid userId, Guid requestId, CancellationToken ct) =>
-        CloseAsync(r => r.Id == requestId && r.ReceiverId == userId, FriendRequestStatus.Declined, ct);
+        CloseAsync(userId, requestId, r => r.Id == requestId && r.ReceiverId == userId, FriendRequestStatus.Declined, ct);
 
     public Task<ServiceResult<FriendRequestResponse>> CancelAsync(Guid userId, Guid requestId, CancellationToken ct) =>
-        CloseAsync(r => r.Id == requestId && r.SenderId == userId, FriendRequestStatus.Cancelled, ct);
+        CloseAsync(userId, requestId, r => r.Id == requestId && r.SenderId == userId, FriendRequestStatus.Cancelled, ct);
 
     private async Task<ServiceResult<FriendRequestResponse>> CloseAsync(
-        Expression<Func<FriendRequest, bool>> match, FriendRequestStatus newStatus, CancellationToken ct)
+        Guid userId, Guid requestId, Expression<Func<FriendRequest, bool>> match, FriendRequestStatus newStatus, CancellationToken ct)
     {
         var request = await db.FriendRequests.SingleOrDefaultAsync(match, ct);
         if (request is null)
         {
+            logger.LogDebug("Friend request {RequestId} not found for user {UserId}", requestId, userId);
             return RequestNotFound();
         }
         if (request.Status != FriendRequestStatus.Pending)
@@ -179,6 +202,7 @@ public sealed class FriendService(ChatDbContext db, UserManager<ApplicationUser>
         request.Status = newStatus;
         request.RespondedAt = UtcNow;
         await db.SaveChangesAsync(ct);
+        logger.LogInformation("Friend request {RequestId} {Status} by user {UserId}", request.Id, newStatus, userId);
         return await LoadAsync(request.Id, ct);
     }
 
