@@ -11,7 +11,7 @@ namespace ChatApp.Api.Controllers;
 [Route("connect")]
 [AllowAnonymous]
 [EnableRateLimiting(RateLimitPolicies.Auth)]
-public sealed class TokenController(AuthService auth) : ApiControllerBase
+public sealed class TokenController(AuthService auth, ILogger<TokenController> logger) : ApiControllerBase
 {
     /// <summary>
     /// Supported grants: <c>password</c> (first-party clients), <c>refresh_token</c>, and
@@ -25,6 +25,9 @@ public sealed class TokenController(AuthService auth) : ApiControllerBase
     {
         Response.Headers.CacheControl = "no-store";
         Response.Headers.Pragma = "no-cache";
+
+        // Tags every log written while handling this grant, including those from AuthService.
+        using var _ = logger.BeginScope(new Dictionary<string, object?> { ["GrantType"] = request.GrantType });
 
         switch (request.GrantType)
         {
@@ -67,10 +70,14 @@ public sealed class TokenController(AuthService auth) : ApiControllerBase
             }
 
             default:
+                logger.LogWarning("Token request with unsupported grant type {GrantType}", request.GrantType);
                 return OAuthError("unsupported_grant_type", $"grant_type '{request.GrantType}' is not supported.");
         }
     }
 
-    private BadRequestObjectResult OAuthError(string error, string description) =>
-        BadRequest(new OAuthErrorResponse(error, description));
+    private BadRequestObjectResult OAuthError(string error, string description)
+    {
+        logger.LogDebug("Token request failed with {OAuthError}: {OAuthErrorDescription}", error, description);
+        return BadRequest(new OAuthErrorResponse(error, description));
+    }
 }

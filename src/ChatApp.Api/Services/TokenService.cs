@@ -10,7 +10,7 @@ using Microsoft.IdentityModel.Tokens;
 
 namespace ChatApp.Api.Services;
 
-public sealed class TokenService(IOptions<JwtOptions> options)
+public sealed class TokenService(IOptions<JwtOptions> options, ILogger<TokenService> logger)
 {
     private readonly JsonWebTokenHandler _handler = new();
 
@@ -18,10 +18,11 @@ public sealed class TokenService(IOptions<JwtOptions> options)
     {
         var jwt = options.Value;
 
+        var jti = Guid.NewGuid().ToString();
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
-            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new(JwtRegisteredClaimNames.Jti, jti),
             new(JwtRegisteredClaimNames.UniqueName, user.UserName!),
             new(AppClaimTypes.DisplayName, user.DisplayName)
         };
@@ -31,6 +32,7 @@ public sealed class TokenService(IOptions<JwtOptions> options)
         }
         claims.AddRange(roles.Select(role => new Claim(AppClaimTypes.Role, role)));
 
+        logger.LogDebug("Creating access token {Jti} for user {UserId}, expires at {ExpiresAt}", jti, user.Id, expiresAt);
         return _handler.CreateToken(new SecurityTokenDescriptor
         {
             Issuer = jwt.Issuer,

@@ -20,7 +20,8 @@ public sealed class AuthController(
     UserManager<ApplicationUser> userManager,
     IOptions<ExternalAuthOptions> externalOptions,
     IWebHostEnvironment environment,
-    TimeProvider time) : ApiControllerBase
+    TimeProvider time,
+    ILogger<AuthController> logger) : ApiControllerBase
 {
     [HttpPost("register")]
     [AllowAnonymous]
@@ -39,6 +40,8 @@ public sealed class AuthController(
         var result = await userManager.CreateAsync(user, request.Password);
         if (!result.Succeeded)
         {
+            logger.LogWarning("Registration of {UserName} failed: {@ErrorCodes}",
+                request.UserName, result.Errors.Select(e => e.Code));
             foreach (var error in result.Errors)
             {
                 ModelState.AddModelError(error.Code, error.Description);
@@ -46,6 +49,7 @@ public sealed class AuthController(
             return ValidationProblem(ModelState);
         }
 
+        logger.LogInformation("Registered user {UserId} ({UserName})", user.Id, user.UserName);
         var tokens = await auth.IssueTokensAsync(user, ct);
         return CreatedAtAction(nameof(Me), null, tokens);
     }
@@ -73,14 +77,16 @@ public sealed class AuthController(
     public async Task<IActionResult> Logout(LogoutRequest request, CancellationToken ct)
     {
         // With a refresh token only that session ends; without one, every session for the user does.
-        if (string.IsNullOrEmpty(request.RefreshToken))
+        var allSessions = string.IsNullOrEmpty(request.RefreshToken);
+        if (allSessions)
         {
             await auth.RevokeAllAsync(CurrentUserId, ct);
         }
         else
         {
-            await auth.RevokeAsync(CurrentUserId, request.RefreshToken, ct);
+            await auth.RevokeAsync(CurrentUserId, request.RefreshToken!, ct);
         }
+        logger.LogInformation("User {UserId} logged out (all sessions: {AllSessions})", CurrentUserId, allSessions);
         return NoContent();
     }
 
@@ -130,6 +136,7 @@ public sealed class AuthController(
             .FirstOrDefault(name => string.Equals(name, provider, StringComparison.OrdinalIgnoreCase));
         if (scheme is null)
         {
+            logger.LogWarning("External login requested for unknown provider {Provider}", provider);
             return Problem(statusCode: StatusCodes.Status404NotFound, title: "Unknown provider",
                 detail: $"External provider '{provider}' is not configured.");
         }
@@ -140,18 +147,22 @@ public sealed class AuthController(
             // but real clients must use a registered redirect URI and the code exchange.
             if (!environment.IsDevelopment())
             {
+                logger.LogWarning("External login with {Provider} rejected: {Reason}", scheme, "redirect_uri missing");
                 return Problem(statusCode: StatusCodes.Status400BadRequest, title: "invalid_request",
                     detail: "redirect_uri is required.");
             }
         }
         else if (!externalOptions.Value.AllowedRedirectUris.Contains(redirectUri, StringComparer.Ordinal))
         {
+            logger.LogWarning("External login with {Provider} rejected: unregistered redirect_uri {RedirectUri}", scheme, redirectUri);
             return Problem(statusCode: StatusCodes.Status400BadRequest, title: "invalid_request",
                 detail: "redirect_uri is not registered.");
         }
 
         if (codeChallenge is not null && codeChallengeMethod != "S256")
         {
+            logger.LogWarning("External login with {Provider} rejected: unsupported code_challenge_method {CodeChallengeMethod}",
+                scheme, codeChallengeMethod);
             return Problem(statusCode: StatusCodes.Status400BadRequest, title: "invalid_request",
                 detail: "Only code_challenge_method=S256 is supported.");
         }
@@ -161,6 +172,8 @@ public sealed class AuthController(
         properties.Items[ExternalAuthItems.RedirectUri] = redirectUri;
         properties.Items[ExternalAuthItems.State] = state;
         properties.Items[ExternalAuthItems.CodeChallenge] = codeChallenge;
+        logger.LogInformation("Starting external login with {Provider} (redirect_uri: {RedirectUri}, PKCE: {UsesPkce})",
+            scheme, redirectUri, codeChallenge is not null);
         return Challenge(properties, scheme);
     }
 
@@ -175,6 +188,7 @@ public sealed class AuthController(
         if (!result.Succeeded
             || result.Properties.GetString(ExternalAuthItems.Provider) is not { } provider)
         {
+            logger.LogWarning(result.Failure, "External login callback received without a valid external session");
             return Problem(statusCode: StatusCodes.Status401Unauthorized, title: "External login failed",
                 detail: "No external login session was found. Start again from /api/auth/external/{provider}.");
         }
@@ -197,9 +211,11 @@ public sealed class AuthController(
 
         if (redirectUri is null)
         {
+            logger.LogInformation("External login with {Provider} completed for user {UserId} ({Flow})", provider, user.Id, "direct");
             return Ok(await auth.IssueTokensAsync(user, ct));
         }
 
+        logger.LogInformation("External login with {Provider} completed for user {UserId} ({Flow})", provider, user.Id, "code");
         var code = auth.CreateAuthorizationCode(user.Id, redirectUri, result.Properties.GetString(ExternalAuthItems.CodeChallenge));
         return Redirect(QueryHelpers.AddQueryString(redirectUri, new Dictionary<string, string?>
         {
