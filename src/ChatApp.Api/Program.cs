@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ChatApp.Api.Data;
 using ChatApp.Api.Extensions;
+using ChatApp.Api.Infrastructure;
 using ChatApp.Api.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.JsonWebTokens;
@@ -22,8 +23,9 @@ try
         .ReadFrom.Services(services));
 
     builder.Services.AddControllers()
-        .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
+    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
     builder.Services.AddProblemDetails();
+    builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
     builder.Services.AddChatSwagger();
     builder.Services.AddOpenApi();
     builder.Services.AddMemoryCache();
